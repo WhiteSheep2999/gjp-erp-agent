@@ -314,14 +314,19 @@ def cmd_list(args):
     paramjson = {}
     if args.typeid:
         paramjson["typeid"] = args.typeid
-    if args.name:
-        paramjson["fullname"] = args.name
-    # 分页循环查全部（防漏数据）
+    # 注意：接口的 fullname 参数实测不生效（pagetotal=0），名称过滤改为本地匹配
     items = query_ptype_all(cfg, api_info, signkey, paramjson)
+    if args.name:
+        kw = args.name.strip().lower()
+        items = [it for it in items if
+                 kw in (it.get("fullname") or "").lower() or
+                 kw in (it.get("name") or "").lower() or
+                 kw in (it.get("namepy") or "").lower() or
+                 kw in (it.get("usercode") or "").lower()]
     if args.nospec:
         items = [it for it in items if not (it.get("standard") or "").strip()]
     if args.json:
-        print(json.dumps(res, ensure_ascii=False, default=str))
+        print(json.dumps(items, ensure_ascii=False, default=str))
         return
     print(f"共 {len(items)} 条：")
     for it in items:
@@ -365,12 +370,25 @@ def cmd_add(args):
 
 def cmd_modify(args):
     cfg, signkey, api_info = get_ctx()
-    # 只允许安全字段（用户想改的字段）
+    # 显式字段映射（不能遍历 SAFE_FIELDS+getattr：--code 要对 usercode，--name 要改全名 fullname，
+    # 简名用 --shortname 单独传，否则 --name 会误写进 name(简名) 而 fullname 没变——真实踩过）
     data = {}
-    for k in SAFE_FIELDS:
-        v = getattr(args, k, None)
-        if v is not None:
-            data[k] = v
+    if args.code:
+        data["usercode"] = args.code
+    if args.name:
+        data["fullname"] = args.name          # --name 语义=改全名
+    if args.shortname:
+        data["name"] = args.shortname          # --shortname 语义=改简名
+    if args.standard:
+        data["standard"] = args.standard
+    if args.comment:
+        data["comment"] = args.comment
+    if args.refprice:
+        data["refprice"] = args.refprice
+    if args.safeqty:
+        data["safeqty"] = args.safeqty
+    if args.safedaycount:
+        data["safedaycount"] = args.safedaycount
     if not data:
         print("⛔ 没有可修改的安全字段（黑名单字段禁止修改）")
         sys.exit(1)
@@ -406,9 +424,8 @@ def cmd_modify(args):
 
 def cmd_disable(args):
     cfg, signkey, api_info = get_ctx()
-    # 查目标分组下的存货
-    res = query_ptype(cfg, api_info, signkey, {"pagesize": 200, "pageindex": 1, "typeid": args.typeid, "bsonnum": 0})
-    items = res.get("response") or []
+    # 分页循环查目标分组下所有节点（防超 200 条漏数据）
+    items = query_ptype_all(cfg, api_info, signkey, {"typeid": args.typeid, "bsonnum": 0})
     direct = [it for it in items if it.get("parid") == args.typeid]
     goods = [it for it in direct if not it.get("sonnum")]
     # 过滤条件
@@ -431,8 +448,11 @@ def cmd_disable(args):
     ok_count = 0
     for it in targets:
         rec = it.get("rec")
+        # 从原记录继承核算方法/必填字段（不写死，避免改错其他核算类型的存货）
         data = {"usercode": it.get("usercode"), "fullname": it.get("fullname"),
-                "gpfullname": "库存商品", "costmode": 4, "deleted": 1, "inputno": "会计主管"}
+                "gpfullname": it.get("gpfullname") or "库存商品",
+                "costmode": it.get("costmode") if it.get("costmode") is not None else 4,
+                "deleted": 1, "inputno": "会计主管"}
         params = build_baseinfo_params(cfg, api_info, "ptype", data, actiontype="modify", rec=str(rec))
         r = biz_post(cfg, api_info, signkey, params)
         code = r.get("code")
@@ -457,8 +477,11 @@ def cmd_enable(args):
     if not require_confirm(args, desc):
         sys.exit(2)
     backup_records([target], f"enable_rec{args.rec}")
+    # 从原记录继承核算方法（不写死，避免改错核算类型）
     data = {"usercode": target.get("usercode"), "fullname": target.get("fullname"),
-            "gpfullname": "库存商品", "costmode": 4, "deleted": 0, "inputno": "会计主管"}
+            "gpfullname": target.get("gpfullname") or "库存商品",
+            "costmode": target.get("costmode") if target.get("costmode") is not None else 4,
+            "deleted": 0, "inputno": "会计主管"}
     params = build_baseinfo_params(cfg, api_info, "ptype", data, actiontype="modify", rec=str(args.rec))
     r = biz_post(cfg, api_info, signkey, params)
     code = r.get("code")
@@ -482,10 +505,12 @@ def cmd_restore(args):
     ok_count = 0
     for it in records:
         rec = it.get("rec")
+        # 从备份记录继承核算方法（备份里有的用备份值，没有的 fallback）
         data = {
             "usercode": it.get("usercode"),
             "fullname": it.get("fullname"),
-            "gpfullname": "库存商品", "costmode": 4,
+            "gpfullname": it.get("gpfullname") or "库存商品",
+            "costmode": it.get("costmode") if it.get("costmode") is not None else 4,
             "deleted": it.get("deleted", 0),
             "inputno": "会计主管",
         }
@@ -575,8 +600,9 @@ def main():
     p5 = sub.add_parser("modify", help="修改存货")
     add_json(p5)
     p5.add_argument("--rec", required=True)
-    p5.add_argument("--code")
-    p5.add_argument("--name")
+    p5.add_argument("--code", help="改编号(usercode)")
+    p5.add_argument("--name", help="改全名(fullname)")
+    p5.add_argument("--shortname", help="改简名(name)")
     p5.add_argument("--standard")
     p5.add_argument("--comment", help="备注")
     p5.add_argument("--refprice", help="参考成本")

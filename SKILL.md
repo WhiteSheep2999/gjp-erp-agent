@@ -33,7 +33,7 @@ python3 scripts/gjp_tool.py groups
 # 查存货（可按分组/名称/无规格筛选）
 python3 scripts/gjp_tool.py list
 python3 scripts/gjp_tool.py list --typeid 00206          # 按分组
-python3 scripts/gjp_tool.py list --name "糖醋"           # 按名称模糊
+python3 scripts/gjp_tool.py list --name "糖醋"           # 按名称模糊（本地匹配 fullname/name/namepy/usercode）
 python3 scripts/gjp_tool.py list --nospec                # 只看无规格
 python3 scripts/gjp_tool.py list --json                  # JSON 输出
 
@@ -51,6 +51,8 @@ python3 scripts/gjp_tool.py add --code CP-100 --name "新产品" --standard "400
 
 # 修改存货（只能改安全字段：编号/名称/规格/备注/停用等）
 python3 scripts/gjp_tool.py modify --rec 123 --code CP-101 --name "新产品" --yes
+#   --code 改编号(usercode) / --name 改全名(fullname) / --shortname 改简名(name)
+#   其他安全字段：--standard --comment --refprice --safeqty --safedaycount
 
 # 停用某分组下无规格的存货（先 --list 预览，再执行）
 python3 scripts/gjp_tool.py disable --typeid 00206 --nospec --list   # 预览（不执行）
