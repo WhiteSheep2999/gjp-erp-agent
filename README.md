@@ -1,99 +1,59 @@
-# gjp-erp-agent
+# gjp-erp-agent Skill — 管家婆 ERP 增查改
 
-管家婆云工贸 ERP 数据操作 Skill —— 让 AI Agent 安全地完成存货档案的增、查、改、停用、恢复等操作。
+给 AI Agent 使用的管家婆云工贸 ERP 数据操作技能包。Agent 通过安全工具箱脚本完成存货档案的增、查、改、停用、恢复等操作，内置写保护（强制确认、自动备份、危险字段拦截、审计日志），防止误删误改。
 
-## 特性
+## 安装（给管理员/人类）
 
-- **安全第一**：写操作强制确认（`--yes`）、危险字段黑名单（管理批号/自定义项/计价方式/序列号等禁止修改）、写前自动备份、审计日志、无删除只有停用
-- **自包含**：纯 Python 标准库，无第三方依赖，拷贝即用
-- **可分发**：适合作为 Skill 打包给任何 AI Agent（OpenClaw / Claude / 自研 Agent）使用
+1. 把整个 `gjp-erp-agent/` 目录放到目标 agent 的 skills 目录（如 OpenClaw 的 `~/.agents/skills/` 或 `~/.openclaw/skills/`）
+2. **配置凭证**：复制 `config.example.json` 为 `config.json`，填入真实值：
+
+```json
+{
+  "环境": "测试",
+  "AppKey": "从管家婆厂家申请",
+  "SecretKey": "从管家婆厂家申请",
+  "UserId": "公司账号（云版=注册手机号）",
+  "DbName": "账套数据库名（云版找代理商/管理员查）"
+}
+```
+
+3. 建议把 `config.json` 权限设为 600：`chmod 600 config.json`
+4. 授权到期前联系管家婆厂家续期（到期接口失效）
 
 ## 结构
 
 ```
 gjp-erp-agent/
-├── SKILL.md              # agent 指令（触发词/流程/安全规则/命令表/踩坑记录）
-├── README.md             # 使用说明
-├── config.example.json   # 凭证配置模板（不含真实密钥）
+├── SKILL.md              # agent 指令（触发词/流程/安全规则/命令表/踩坑）
+├── config.example.json   # 凭证模板（不含真实密钥）
+├── README.md             # 本文件
 └── scripts/
-    ├── gjp_tool.py       # 安全工具箱（唯一入口）
+    ├── gjp_tool.py       # 安全工具箱（唯一入口，纯标准库无依赖）
     └── gjp_api_client.py # 底层 API 客户端
-```
-
-## 快速开始
-
-### 1. 安装
-
-```bash
-# 放到目标 agent 的 skills 目录（如 OpenClaw 的 ~/.agents/skills/）
-cp -r gjp-erp-agent ~/.agents/skills/
-```
-
-### 2. 配置凭证
-
-```bash
-cd gjp-erp-agent
-cp config.example.json config.json
-chmod 600 config.json
-# 编辑 config.json 填入真实值
-```
-
-配置项：
-- `AppKey` / `SecretKey`：向管家婆厂家申请
-- `UserId`：公司账号（云版=注册手机号）
-- `DbName`：账套数据库名（云版找代理商/管理员查询）
-
-### 3. 测试连通
-
-```bash
-python3 scripts/gjp_tool.py ping
 ```
 
 ## 使用
 
-### 读操作（Agent 可直接调用）
+- agent 加载 skill 后，读操作直接执行；写操作必须先展示计划、经用户确认、加 `--yes` 执行
+- 测试/正式环境切换：只改 config.json 的 UserId/DbName
+- 误操作恢复：`python3 scripts/gjp_tool.py restore --from backups/备份文件 --yes`
+
+## 安全说明
+
+- 写操作强制 `--yes` 确认（或环境变量 GJP_AUTO_APPROVE=1）
+- 危险字段黑名单：管理批号/自定义项/序列号/计价方式/核算方法等禁止修改
+- 写前自动备份到 `backups/`，审计日志 `audit.log`
+- 无删除操作，只有停用（可逆）
+
+## 测试
 
 ```bash
-python3 scripts/gjp_tool.py groups                        # 存货分组树
-python3 scripts/gjp_tool.py list --typeid 00206           # 按分组查存货
-python3 scripts/gjp_tool.py list --name "糖醋"            # 按名称模糊查
-python3 scripts/gjp_tool.py list --nospec                 # 只看无规格
-python3 scripts/gjp_tool.py log --tail 50                 # 审计日志
+cd gjp-erp-agent
+python3 scripts/gjp_tool.py ping        # 连通性测试
+python3 scripts/gjp_tool.py groups      # 分组树
+python3 scripts/gjp_tool.py list        # 查存货
 ```
 
-### 写操作（必须 --yes，且先经用户确认）
+## 版本记录
 
-```bash
-python3 scripts/gjp_tool.py add --code CP-100 --name "新产品" --standard "400g" --unit "瓶" --yes
-python3 scripts/gjp_tool.py modify --rec 123 --code CP-101 --name "新产品" --yes
-python3 scripts/gjp_tool.py disable --typeid 00206 --nospec --list   # 预览
-python3 scripts/gjp_tool.py disable --typeid 00206 --nospec --yes    # 执行
-python3 scripts/gjp_tool.py enable --rec 123 --yes
-python3 scripts/gjp_tool.py restore --from backups/backup_xxx.json --yes  # 从备份恢复
-```
-
-## 安全设计
-
-| 机制 | 说明 |
-|---|---|
-| 写操作强制确认 | 必须加 `--yes`（或环境变量 `GJP_AUTO_APPROVE=1`），否则拒绝执行 |
-| 危险字段黑名单 | 管理批号/自定义项/序列号/计价方式/核算方法等禁止修改（不暴露参数，天然拦截） |
-| 安全字段白名单 | 只允许修改编号/名称/规格/备注/停用标志/参考成本/安全库存 |
-| 写前自动备份 | 每次写操作快照到 `backups/`，`restore` 一键恢复 |
-| 审计日志 | 所有写操作记录到 `audit.log`，可追溯 |
-| 无删除 | 只有停用（deleted=1），可逆 |
-
-## API 对接说明
-
-管家婆 API 对接要点（详见 `SKILL.md`）：
-- 通用接口获取 SignKey + ApiServerAddress（24 小时有效，脚本自动续期）
-- 签名算法：MD5 32 位小写；getsignstr 不排 MethodName，getcustomerapiurl 不排 DbName
-- 查询响应字段是小写（usercode/fullname 等），文档示例大写是笔误
-
-## 版本
-
-- v1.0（2026-10-30）：初版，基于管家婆 M7 22.0 测试环境验证
-
-## License
-
-MIT
+- 2026-10-30 v1.0：初版，基于安徽颍盛管家婆 M7 22.0 测试环境验证（签名/查询/新增/修改/停用全部实测通过）

@@ -123,11 +123,11 @@ def backup_records(records, tag):
 
 
 def require_confirm(args, action_desc):
-    """写操作强制确认：--yes 或环境变量 GJP_AUTO_APPROVE=1"""
-    if args.yes or os.environ.get("GJP_AUTO_APPROVE") == "1":
+    """写操作强制确认：必须 --yes 参数（无环境变量后门）"""
+    if args.yes:
         return True
     print(f"⛔ 需要确认：{action_desc}")
-    print("   确认请加 --yes 参数（或设置环境变量 GJP_AUTO_APPROVE=1）")
+    print("   确认请加 --yes 参数")
     return False
 
 
@@ -210,6 +210,52 @@ def query_ptype(cfg, api_info, signkey, paramjson):
     return call_biz(api_info.get("ApiServerAddress"), params, signkey)
 
 
+def query_ptype_all(cfg, api_info, signkey, paramjson):
+    """分页循环查询全部结果（防止超 200 条漏数据）。
+    注意：无筛选时会拉全库（几万条/上百页，很慢），调用方应尽量带 typeid/usercode 缩小范围。"""
+    all_items = []
+    page = 1
+    while True:
+        pj = dict(paramjson)
+        pj["pagesize"] = 200
+        pj["pageindex"] = page
+        res = query_ptype(cfg, api_info, signkey, pj)
+        items = res.get("response") or []
+        all_items.extend(items)
+        if len(items) < 200 or (res.get("pagetotal") and len(all_items) >= res.get("pagetotal")):
+            break
+        page += 1
+    return all_items
+
+
+def find_by_rec(cfg, api_info, signkey, rec, typeid=None, usercode=None):
+    """按 rec 定位记录：优先 usercode 精确查（1页），其次 typeid 限定分页，最后全表分页兜底。
+    返回记录 dict 或 None。"""
+    # 1) 有 usercode：精确查，1 页即可
+    if usercode:
+        res = query_ptype(cfg, api_info, signkey, {"pagesize": 200, "pageindex": 1, "usercode": usercode})
+        for it in res.get("response") or []:
+            if str(it.get("rec")) == str(rec):
+                return it
+    # 2) 有 typeid：限定范围分页
+    if typeid:
+        items = query_ptype_all(cfg, api_info, signkey, {"bsonnum": 0, "typeid": typeid})
+        for it in items:
+            if str(it.get("rec")) == str(rec):
+                return it
+        return None
+    # 3) 无筛选：先试第一页（多数新记录在前），再全表
+    res = query_ptype(cfg, api_info, signkey, {"pagesize": 200, "pageindex": 1, "bsonnum": 0})
+    for it in res.get("response") or []:
+        if str(it.get("rec")) == str(rec):
+            return it
+    items = query_ptype_all(cfg, api_info, signkey, {"bsonnum": 0})
+    for it in items:
+        if str(it.get("rec")) == str(rec):
+            return it
+    return None
+
+
 def build_baseinfo_params(cfg, api_info, basetype, data, actiontype="add", rec="0"):
     return {
         "managename": "GraspCMServerApi.dll",
@@ -265,19 +311,19 @@ def cmd_groups(args):
 
 def cmd_list(args):
     cfg, signkey, api_info = get_ctx()
-    paramjson = {"pagesize": 200, "pageindex": 1}
+    paramjson = {}
     if args.typeid:
         paramjson["typeid"] = args.typeid
     if args.name:
         paramjson["fullname"] = args.name
-    res = query_ptype(cfg, api_info, signkey, paramjson)
-    items = res.get("response") or []
+    # 分页循环查全部（防漏数据）
+    items = query_ptype_all(cfg, api_info, signkey, paramjson)
     if args.nospec:
         items = [it for it in items if not (it.get("standard") or "").strip()]
     if args.json:
         print(json.dumps(res, ensure_ascii=False, default=str))
         return
-    print(f"共 {res.get('pagetotal', len(items))} 条，本页 {len(items)} 条：")
+    print(f"共 {len(items)} 条：")
     for it in items:
         spec = it.get("standard") or ""
         deleted = "🔴停用" if it.get("deleted") else ""
@@ -319,7 +365,7 @@ def cmd_add(args):
 
 def cmd_modify(args):
     cfg, signkey, api_info = get_ctx()
-    # 只允许安全字段
+    # 只允许安全字段（用户想改的字段）
     data = {}
     for k in SAFE_FIELDS:
         v = getattr(args, k, None)
@@ -328,20 +374,19 @@ def cmd_modify(args):
     if not data:
         print("⛔ 没有可修改的安全字段（黑名单字段禁止修改）")
         sys.exit(1)
-    # 查询原记录
-    res = query_ptype(cfg, api_info, signkey, {"pagesize": 5, "pageindex": 1, "typeid": args.typeid or ""})
-    # 直接按 rec 查（用通用查询参数，rec 过滤）
-    # 简化：按 typeid+bsonnum 查全部后匹配 rec
-    check = query_ptype(cfg, api_info, signkey, {"pagesize": 200, "pageindex": 1, "bsonnum": 0, "typeid": args.typeid or ""})
-    items = check.get("response") or []
-    target = None
-    for it in items:
-        if str(it.get("rec")) == str(args.rec):
-            target = it
-            break
+    # 定位原记录（优先 usercode/typeid 缩小范围，避免全库遍历）
+    target = find_by_rec(cfg, api_info, signkey, args.rec, typeid=args.typeid, usercode=args.usercode)
     if not target:
         print(f"⛔ 找不到 rec={args.rec} 的记录")
         sys.exit(1)
+    # 必填字段：modify 时管家婆要求 gpfullname/costmode/inputno 不能空——
+    # 从原记录继承（不改动这些字段的值，仅保证提交时不缺字段）
+    # 注意：不能写 DANGER_FIELDS（黑名单），所以这里只“补全提交”，不改变字段值
+    data.setdefault("usercode", target.get("usercode") or "")
+    data.setdefault("fullname", target.get("fullname") or "")
+    data.setdefault("gpfullname", target.get("gpfullname") or "库存商品")
+    data.setdefault("costmode", target.get("costmode") if target.get("costmode") is not None else 4)
+    data.setdefault("inputno", "会计主管")
     desc = f"修改 rec={args.rec} ({target.get('usercode')} {target.get('fullname')}) → {data}"
     if not require_confirm(args, desc):
         sys.exit(2)
@@ -403,9 +448,8 @@ def cmd_disable(args):
 
 def cmd_enable(args):
     cfg, signkey, api_info = get_ctx()
-    res = query_ptype(cfg, api_info, signkey, {"pagesize": 200, "pageindex": 1, "bsonnum": 0})
-    items = res.get("response") or []
-    target = next((it for it in items if str(it.get("rec")) == str(args.rec)), None)
+    # 定位记录（先试第一页，再全表兜底）
+    target = find_by_rec(cfg, api_info, signkey, args.rec, typeid=args.typeid, usercode=args.usercode)
     if not target:
         print(f"⛔ 找不到 rec={args.rec}")
         sys.exit(1)
@@ -534,6 +578,11 @@ def main():
     p5.add_argument("--code")
     p5.add_argument("--name")
     p5.add_argument("--standard")
+    p5.add_argument("--comment", help="备注")
+    p5.add_argument("--refprice", help="参考成本")
+    p5.add_argument("--safeqty", help="安全库存数量")
+    p5.add_argument("--safedaycount", help="安全库存天数")
+    p5.add_argument("--usercode", help="按编号精确定位（加快查找）")
     p5.add_argument("--typeid", help="辅助定位记录")
     p5.add_argument("--yes", action="store_true", help="确认执行")
     p5.set_defaults(func=cmd_modify)
@@ -549,6 +598,8 @@ def main():
     p7 = sub.add_parser("enable", help="恢复启用")
     add_json(p7)
     p7.add_argument("--rec", required=True)
+    p7.add_argument("--usercode", help="按编号精确定位（加快查找）")
+    p7.add_argument("--typeid", help="辅助定位记录")
     p7.add_argument("--yes", action="store_true", help="确认执行")
     p7.set_defaults(func=cmd_enable)
 
