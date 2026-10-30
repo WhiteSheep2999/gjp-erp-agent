@@ -1,0 +1,8 @@
+{
+  "环境": "测试",
+  "AppKey": "请填入你的AppKey",
+  "SecretKey": "请填入你的SecretKey",
+  "UserId": "请填入你的UserId",
+  "DbName": "请填入你的DbName",
+  "说明": "从管家婆厂家申请 AppKey/SecretKey；UserId=公司账号（云版=注册手机号）；DbName=账套数据库名（云版找代理商/管理员查）。测试/正式环境切换只改 UserId 和 DbName。此文件权限请设为 600，勿泄露。"
+}
